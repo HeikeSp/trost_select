@@ -1,0 +1,526 @@
+---
+title: "TROST Select: LASSO Model"
+author: "Heike Sprenger"
+date: "07/06/2020"
+output:
+  html_document:
+    highlight: tango
+    number_section: yes
+    theme: cerulean
+    toc: yes
+    toc_float: true
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(echo = TRUE, fig.width=5, fig.height=5, cache=FALSE, highlight = TRUE, fig.show="asis")
+# opts_knit$set(root.dir = '../')
+
+library(caret)
+library(glmnet)
+library(tidyverse)
+library(pcaMethods)
+
+# load workspace
+# load("lasso_model.RData")
+```
+
+# Load functions
+```{r load functions}
+source("func_prep_pca.R")
+source("func_remove_factors.R")
+```
+
+
+# Load data
+## Tolerance information
+```{r tolerance information}
+tolerance <- read.table("tolerance.txt", sep = "\t", header = T)
+```
+
+
+## Transcript data
+
+**TROST: 202 samples, 42 transcripts**
+
+**all data: 1159 samples**
+
+```{r load transcript data}
+# ALL
+transcript_data_all <- read.table("log_norm_ct_trost_valdis.txt", header = T, sep = "\t")
+transcript_samples_all <- 
+  read.table("transcript_samplelist_trost_valdis.txt", header=TRUE, sep="\t") %>%
+  left_join(tolerance[,-3], by = "subspecies_id")
+
+transcript_samples_all$row_id <- rownames(transcript_data_all)
+
+# VALDIS lines
+transcript_samples_valdis <- 
+  read.table("transcript_samplelist_valdis.txt", header = T, sep = "\t") %>%
+  dplyr::select(line_id, crossing, name) %>% distinct
+```
+
+## Metabolite data
+
+**911 samples, XXX metabolites**
+
+```{r load metabolite data}
+metabolite_data_all <- read.table("metabolite_data_trost_valdis.txt", 
+                                  header = T, sep = "\t", check.names = F)
+dim(metabolite_data_all) 
+# 2336 samples, 81 metabolites
+
+metabolite_samples_all <- 
+  read.table("metabolite_samplelist_trost_valdis.txt", header=TRUE, sep="\t") %>%
+  left_join(tolerance, by = "cultivar")
+
+# Import analytes overlap table (overlap regarding 17 measured TROST experiments, not the QC experiments) includes 81 analytes
+analytes <- 
+  read.table("analytes_trost_valdis.txt", sep = "\t", header = T) %>% 
+  filter(select_part == "yes") %>%
+  arrange(analyte) %>% droplevels
+
+length(analytes$name) # 81
+colnames(metabolite_data_all) <- analytes$MPIMP_ID
+```
+
+# Remove batch effect in metabolite data
+```{r Remove batch effect in metabolite data}
+metabolite_data_norm <- apply(metabolite_data_all, 2, 
+                              RemoveFactors, 
+                              sam = metabolite_samples_all, 
+                              facs=c("genotype", "treatment", "SequenceID", "BatchID", "log10_AvgAnnotated"), 
+                              keep=c("genotype", "treatment"))
+
+sum(is.na(metabolite_data_norm)) / (ncol(metabolite_data_norm)*nrow(metabolite_data_norm))*100
+# 4.5%
+```
+
+
+# PCA
+## Transcripts
+```{r PCA transcripts}
+pca_transcript_all <- func_prep_pca(transcript_data_all, 
+                                     scale_method = "none", 
+                                     center_option = FALSE, 
+                                     pc_number = 5, 
+                                     pca_method = "rnipals")
+
+# complete observations
+compObs_transcript_all <- 
+  pca_transcript_all@completeObs %>%
+  as.data.frame
+```
+
+## Metabolites
+```{r PCA metabolites}
+pca_metabolite_all <- func_prep_pca(metabolite_data_norm, 
+                                    scale_method = "none", 
+                                    center_option = FALSE, 
+                                    pc_number = 10, 
+                                    pca_method = "rnipals")
+
+# complete observations
+compObs_metabolite_all <- 
+  pca_metabolite_all@completeObs %>%
+  as.data.frame
+```
+
+
+# Define training and test data
+
+**Subsets: TROST and VALDIS**
+
+## Transcripts
+
+### TROST data for training model
+
+```{r TROST subset transcripts}
+transcript_samples_training <- 
+  transcript_samples_all %>%
+  filter(cultivation == "field") %>%
+  filter(trost_valdis == "trost") %>%
+  filter(!is.na(model_set)) %>%
+  droplevels()
+  
+compObs_transcript_training <-
+  compObs_transcript_all %>%
+  rownames_to_column("row_id") %>%
+  filter(row_id %in% transcript_samples_training$row_id) %>%
+  column_to_rownames("row_id")
+
+dim(compObs_transcript_training) # 202 samples
+```
+
+### VALDIS data for model prediction
+
+```{r VALDIS subset transcripts}
+transcript_samples_pred <- 
+  transcript_samples_all %>%
+  filter(trost_valdis == "valdis") %>%
+  droplevels()
+
+compObs_transcript_pred <-
+  compObs_transcript_all %>%
+  rownames_to_column("row_id") %>%
+  filter(row_id %in% transcript_samples_pred$row_id) %>%
+  column_to_rownames("row_id")
+
+dim(compObs_transcript_pred) # 803 samples
+```
+
+## Metabolites
+
+### TROST data for training model
+
+```{r TROST subset metabolites}
+metabolite_samples_training <- 
+  metabolite_samples_all %>%
+  filter(cultivation == "field") %>%
+  filter(trost_valdis == "trost") %>%
+  filter(!is.na(model_set)) %>%
+  droplevels()
+
+compObs_metabolite_training <-
+  compObs_metabolite_all %>%
+  rownames_to_column("chromatogram") %>%
+  filter(chromatogram %in% metabolite_samples_training$chromatogram) %>%
+  column_to_rownames("chromatogram")
+
+dim(compObs_metabolite_training) # 911 samples
+```
+
+### VALDIS transcript data for model prediction
+
+```{r VALDIS subset metabolites}
+metabolite_samples_pred <- 
+  metabolite_samples_all %>%
+  filter(trost_valdis == "valdis") %>%
+  droplevels()
+
+compObs_metabolite_pred <-
+  compObs_metabolite_all %>%
+  rownames_to_column("chromatogram") %>%
+  filter(chromatogram %in% metabolite_samples_pred$chromatogram) %>%
+  column_to_rownames("chromatogram")
+
+dim(compObs_metabolite_pred) # 806 samples
+```
+
+# LASSO Model
+## Transcripts
+### Moodel training
+
+``mdrym_fve``: Median DRYM
+
+```{r LASSO model training transcripts}
+set.seed(1)
+lasso_fit_transcript <- glmnet(x = as.matrix(compObs_transcript_training), 
+                                y = transcript_samples_training$mdrym_fve)
+plot(lasso_fit_transcript)
+
+# Cross-validation (10-fold)
+set.seed(1111)
+lasso_cv_transcript <- glmnet::cv.glmnet(x = as.matrix(compObs_transcript_training), 
+                                 y = transcript_samples_training$mdrym_fve)
+lasso_cv_transcript$lambda.1se # 0.001209806
+plot(lasso_cv_transcript, ylim=c(0, 0.005))
+
+lasso_cv_transcript_coef_1se <- predict(lasso_cv_transcript, 
+                                         type = "coefficients", 
+                                         s = lasso_cv_transcript$lambda.1se)
+table(as.matrix(lasso_cv_transcript_coef_1se) == 0) # 23 transcripts left
+```
+
+### Predict DRYM for VALDIS data
+```{r Predict DRYM for VALDIS transcript data}
+# use largest value of lambda such that CV-error is within 1 standard error of the minimum (ca. 50 metabolites)
+lasso_transcript_predicted_drym_valdis_1se <- 
+  predict(lasso_cv_transcript, 
+          new = as.matrix(compObs_transcript_pred), 
+          s = "lambda.1se")
+
+lasso_transcript_predicted_drym_valdis <- 
+  predict(lasso_cv_transcript, 
+          new = as.matrix(compObs_transcript_pred), 
+          s = "lambda.min")
+```
+
+### Median DRYM values
+```{r lasso sort and aggregate drym values transcripts}
+# join predicted DRYM values with line IDs and calculate median
+lasso_transcript_predicted_drym_valdis_1se_median <- 
+  data.frame(drym = lasso_transcript_predicted_drym_valdis_1se[,1], 
+             line_id = transcript_samples_pred$subspecies_id) %>%
+  group_by(line_id) %>%
+  summarize(median_drym = median(drym)) %>%
+  rename(drym = median_drym) %>%
+  left_join(transcript_samples_valdis, by = "line_id")
+
+lasso_transcript_predicted_drym_valdis_median <- 
+  data.frame(drym = lasso_transcript_predicted_drym_valdis[,1], 
+             line_id = transcript_samples_pred$subspecies_id) %>%
+  group_by(line_id) %>%
+  summarize(median_drym = median(drym)) %>%
+  rename(drym = median_drym) %>%
+  left_join(transcript_samples_valdis, by = "line_id")
+
+# save median of predicted drym
+write.table(lasso_transcript_predicted_drym_valdis_1se_median, 
+            "lasso_transcript_predicted_drym_valdis_1se_median.txt", 
+            sep = "\t", row.names = F)
+```
+
+## Metabolites
+### Moodel training
+
+``mdrym_fve``: Median DRYM
+
+```{r LASSO model training metabolites}
+set.seed(1)
+lasso_fit_metabolite <- glmnet(x = as.matrix(compObs_metabolite_training), 
+                                y = metabolite_samples_training$mdrym_fve)
+plot(lasso_fit_metabolite)
+
+# Cross-validation (10-fold)
+set.seed(1111)
+lasso_cv_metabolite <- glmnet::cv.glmnet(x = as.matrix(compObs_metabolite_training), 
+                                 y = metabolite_samples_training$mdrym_fve)
+lasso_cv_metabolite$lambda.1se # 0.0006964521
+plot(lasso_cv_metabolite, ylim=c(0, 0.005))
+
+# define lambda for sparse model with 29 variables
+lambda.sparse <- 0.002
+
+lasso_cv_metabolite_coef_1se <- predict(lasso_cv_metabolite, 
+                                         type = "coefficients", 
+                                         s = lambda.sparse)
+table(as.matrix(lasso_cv_metabolite_coef_1se) == 0)
+```
+
+### Predict DRYM for VALDIS data
+```{r Predict DRYM for VALDIS metabolite data}
+# use largest value of lambda such that CV-error is within 1 standard error of the minimum (ca. 50 metabolites)
+lasso_metabolite_predicted_drym_valdis_sparse <- 
+  predict(lasso_cv_metabolite, 
+          new = as.matrix(compObs_metabolite_pred), 
+          s = lambda.sparse)
+
+lasso_metabolite_predicted_drym_valdis <- 
+  predict(lasso_cv_metabolite, 
+          new = as.matrix(compObs_metabolite_pred), 
+          s = "lambda.min")
+```
+
+### Median DRYM values
+```{r lasso sort and aggregate drym values metabolites}
+# join predicted DRYM values with line IDs and calculate median
+lasso_metabolite_predicted_drym_valdis_sparse_median <- 
+  data.frame(drym = lasso_metabolite_predicted_drym_valdis_sparse[,1], 
+             line_id = metabolite_samples_pred$cultivar) %>%
+  group_by(line_id) %>%
+  summarize(median_drym = median(drym)) %>%
+  rename(drym = median_drym) %>%
+  mutate(name = str_replace(line_id, "_", "")) %>%
+  mutate(name = str_replace(name, "AxR", "AR")) %>%
+  mutate(name = str_replace(name, "ExA", "EA")) %>%
+  mutate(name = str_replace(name, "ALBATROS", "Albatros")) %>%
+  mutate(name = str_replace(name, "DESIREE", "Desiree")) %>%
+  mutate(name = str_replace(name, "EURORESA", "Euroresa")) %>%
+  mutate(name = str_replace(name, "RAMSES", "Ramses"))
+
+lasso_metabolite_predicted_drym_valdis_median <- 
+  data.frame(drym = lasso_metabolite_predicted_drym_valdis[,1], 
+             line_id = metabolite_samples_pred$cultivar) %>%
+  group_by(line_id) %>%
+  summarize(median_drym = median(drym)) %>%
+  rename(drym = median_drym) %>%
+  mutate(name = str_replace(line_id, "_", "")) %>%
+  mutate(name = str_replace(name, "AxR", "AR")) %>%
+  mutate(name = str_replace(name, "ExA", "EA")) %>%
+  mutate(name = str_replace(name, "ALBATROS", "Albatros")) %>%
+  mutate(name = str_replace(name, "DESIREE", "Desiree")) %>%
+  mutate(name = str_replace(name, "EURORESA", "Euroresa")) %>%
+  mutate(name = str_replace(name, "RAMSES", "Ramses"))
+
+# save median of predicted drym
+write.table(lasso_metabolite_predicted_drym_valdis_sparse_median, 
+            "lasso_metabolite_predicted_drym_valdis_sparse_median.txt", 
+            sep = "\t", row.names = F)
+```
+
+## Combine predicted DRYM values
+```{r Combine predicted DRYM values}
+lasso_predicted_drym_sparse <-
+  lasso_metabolite_predicted_drym_valdis_sparse_median %>%
+  dplyr::select(name, drym) %>%
+  rename(drym_metabolite = drym) %>%
+  left_join(lasso_transcript_predicted_drym_valdis_1se_median, by = "name") %>%
+  rename(drym_transcript = drym) %>%
+  mutate(drym_avg = (drym_metabolite + drym_transcript)/2) %>%
+  arrange(drym_avg)
+
+lasso_predicted_drym <-
+  lasso_metabolite_predicted_drym_valdis_median %>%
+  dplyr::select(name, drym) %>%
+  rename(drym_metabolite = drym) %>%
+  left_join(lasso_transcript_predicted_drym_valdis_median, by = "name") %>%
+  rename(drym_transcript = drym) %>%
+  mutate(drym_avg = (drym_metabolite + drym_transcript)/2) %>%
+  arrange(drym_avg)
+```
+
+## Subpopulations
+```{r Subpopulations}
+lines_MPt <- c("AR1", "AR23", "AR56", "AR67", "AR106", "AR121", "AR157", "AR163", "AR183", 
+               "AR185", "AR196", "AR197", "AR200", "AR241", "AR245", "AR254", "AR269", "AR282",
+               "AR285", "AR293", "EA28", "EA74", "EA87")
+lines_MPs <- c("AR55", "EA2", "EA8", "EA19", "EA22", "EA54", "EA55", "EA71", "EA92", 
+               "EA111", "EA112", "EA131", "EA154", "EA165", "EA172", "EA173", "EA174", 
+               "EA252", "EA269", "EA273", "EA279", "EA280")
+  
+lasso_predicted_drym_sparse$select <- "not"
+lasso_predicted_drym_sparse$select[which(lasso_predicted_drym_sparse$name %in% lines_MPt)] <- "MPt"
+lasso_predicted_drym_sparse$select[which(lasso_predicted_drym_sparse$name %in% lines_MPs)] <- "MPs"
+table(lasso_predicted_drym_sparse$select)
+
+lasso_predicted_drym$select <- "not"
+lasso_predicted_drym$select[which(lasso_predicted_drym$name %in% lines_MPt)] <- "MPt"
+lasso_predicted_drym$select[which(lasso_predicted_drym$name %in% lines_MPs)] <- "MPs"
+table(lasso_predicted_drym$select)
+
+ggplot(lasso_predicted_drym_sparse, aes(x = select, y = drym_avg)) + 
+  geom_boxplot()
+```
+
+
+# Plots
+## Transcripts
+### Boxplot of predicted DRYM vs line
+```{r boxplot of predicted DRYM vs line transcripts}
+lasso_transcript_predicted_drym_valdis_df <- 
+  data.frame(drym = lasso_transcript_predicted_drym_valdis[,1], 
+             line_id = transcript_samples_pred$subspecies_id) %>%
+  left_join(transcript_samples_valdis, by = "line_id")
+
+# sort predicted DRYM values for plot
+lasso_transcript_predicted_drym_valdis_sorted <- 
+  with(lasso_transcript_predicted_drym_valdis_df, reorder(name, drym, median, na.rm=T))
+
+lasso_color <- rep("#00756D", 199) # for ExA
+lasso_color [which( grepl("^AR", levels(lasso_transcript_predicted_drym_valdis_sorted) ))] <- "#BF5300"
+lasso_color [which( levels (lasso_transcript_predicted_drym_valdis_sorted) == "Albatros" )] <- "grey"
+lasso_color [which( levels (lasso_transcript_predicted_drym_valdis_sorted) == "Euroresa" )] <- "#5778B9"
+lasso_color [which( levels (lasso_transcript_predicted_drym_valdis_sorted) == "Ramses" )] <- "#F7B944"
+lasso_color [which( levels (lasso_transcript_predicted_drym_valdis_sorted) == "Desiree" )] <- "white"
+# lasso_color <- subset(lasso_color, levels (lasso_transcript_predicted_drym_valdis_sorted) != "DESIREE")
+lasso_color_fac <- factor(lasso_color)
+
+png("boxplot_lasso_transcript_predicted_drym_valdis_full.png", width=3000, height=1500, res=300)
+par(mar=c(4.5,5,2,0.5))
+boxplot(drym ~ lasso_transcript_predicted_drym_valdis_sorted, data = lasso_transcript_predicted_drym_valdis_df, 
+        ylab="DRYM", cex.lab=1.5, cex.axis=1.2, las=2, col=lasso_color, main = "transcript model", names=F, xlab="genotype")
+legend("bottomright", fill=levels(lasso_color_fac), legend=c("ExA", "E", "AxR", "R", "A"), horiz=T)
+dev.off()
+```
+
+### Boxplot of predicted DRYM vs line (sparse)
+```{r boxplot of predicted DRYM vs line transcripts sparse}
+lasso_transcript_predicted_drym_valdis_1se_df <- 
+  data.frame(drym = lasso_transcript_predicted_drym_valdis_1se[,1], 
+             line_id = transcript_samples_pred$subspecies_id) %>%
+  left_join(transcript_samples_valdis, by = "line_id")
+
+# sort predicted DRYM values for plot
+lasso_transcript_predicted_drym_valdis_1se_sorted <- 
+  with(lasso_transcript_predicted_drym_valdis_1se_df, reorder(name, drym, median, na.rm=T))
+
+lasso_color <- rep("#00756D", 199) # for ExA
+lasso_color [which( grepl("^AR", levels(lasso_transcript_predicted_drym_valdis_1se_sorted) ))] <- "#BF5300"
+lasso_color [which( levels (lasso_transcript_predicted_drym_valdis_1se_sorted) == "Albatros" )] <- "grey"
+lasso_color [which( levels (lasso_transcript_predicted_drym_valdis_1se_sorted) == "Euroresa" )] <- "#5778B9"
+lasso_color [which( levels (lasso_transcript_predicted_drym_valdis_1se_sorted) == "Ramses" )] <- "#F7B944"
+lasso_color [which( levels (lasso_transcript_predicted_drym_valdis_1se_sorted) == "Desiree" )] <- "white"
+# lasso_color <- subset(lasso_color, levels (lasso_transcript_predicted_drym_valdis_1se_sorted) != "DESIREE")
+lasso_color_fac <- factor(lasso_color)
+
+png("boxplot_lasso_transcript_predicted_drym_valdis_1se.png", width=3000, height=1500, res=300)
+par(mar=c(4.5,5,2,0.5))
+boxplot(drym ~ lasso_transcript_predicted_drym_valdis_1se_sorted, data = lasso_transcript_predicted_drym_valdis_1se_df, 
+        ylab="DRYM", cex.lab=1.5, cex.axis=1.2, las=2, col=lasso_color, main = "transcript model", names=F, xlab="genotype")
+legend("bottomright", fill=levels(lasso_color_fac), legend=c("ExA", "E", "AxR", "R", "A"), horiz=T)
+dev.off()
+```
+
+
+## Metabolites
+### Boxplot of predicted DRYM vs line
+```{r boxplot of predicted DRYM vs line metabolites}
+lasso_metabolite_predicted_drym_valdis_df <- 
+  data.frame(drym = lasso_metabolite_predicted_drym_valdis[,1], 
+             line_id = metabolite_samples_pred$cultivar)
+
+# sort predicted DRYM values for plot
+lasso_metabolite_predicted_drym_valdis_sorted <- 
+  with(lasso_metabolite_predicted_drym_valdis_df, reorder(line_id, drym, median, na.rm=T))
+
+lasso_color <- rep("#00756D", 199) # for ExA
+lasso_color [which( grepl("^AxR", levels(lasso_metabolite_predicted_drym_valdis_sorted) ))] <- "#BF5300"
+lasso_color [which( levels (lasso_metabolite_predicted_drym_valdis_sorted) == "ALBATROS" )] <- "grey"
+lasso_color [which( levels (lasso_metabolite_predicted_drym_valdis_sorted) == "EURORESA" )] <- "#5778B9"
+lasso_color [which( levels (lasso_metabolite_predicted_drym_valdis_sorted) == "RAMSES" )] <- "#F7B944"
+lasso_color [which( levels (lasso_metabolite_predicted_drym_valdis_sorted) == "DESIREE" )] <- "white"
+# lasso_color <- subset(lasso_color, levels (lasso_metabolite_predicted_drym_valdis_sorted) != "DESIREE")
+lasso_color_fac <- factor(lasso_color)
+
+png("boxplot_lasso_metabolite_predicted_drym_valdis_full.png", width=3000, height=1500, res=300)
+par(mar=c(4.5,5,2,0.5))
+boxplot(drym ~ lasso_metabolite_predicted_drym_valdis_sorted, data = lasso_metabolite_predicted_drym_valdis_df, 
+        ylab="DRYM", cex.lab=1.5, cex.axis=1.2, las=2, col=lasso_color, main = "metabolite model", names=F, xlab="genotype")
+legend("bottomright", fill=levels(lasso_color_fac), legend=c("ExA", "E", "AxR", "R", "A"), horiz=T)
+dev.off()
+```
+
+### Boxplot of predicted DRYM vs line (sparse)
+```{r boxplot of predicted DRYM vs line metabolites sparse}
+lasso_metabolite_predicted_drym_valdis_sparse_df <- 
+  data.frame(drym = lasso_metabolite_predicted_drym_valdis_sparse[,1], 
+             line_id = metabolite_samples_pred$cultivar)
+
+# sort predicted DRYM values for plot
+lasso_metabolite_predicted_drym_valdis_sparse_sorted <- 
+  with(lasso_metabolite_predicted_drym_valdis_sparse_df, reorder(line_id, drym, median, na.rm=T))
+
+lasso_color <- rep("#00756D", 199) # for ExA
+lasso_color [which( grepl("^AxR", levels(lasso_metabolite_predicted_drym_valdis_sparse_sorted) ))] <- "#BF5300"
+lasso_color [which( levels (lasso_metabolite_predicted_drym_valdis_sparse_sorted) == "ALBATROS" )] <- "grey"
+lasso_color [which( levels (lasso_metabolite_predicted_drym_valdis_sparse_sorted) == "EURORESA" )] <- "#5778B9"
+lasso_color [which( levels (lasso_metabolite_predicted_drym_valdis_sparse_sorted) == "RAMSES" )] <- "#F7B944"
+lasso_color [which( levels (lasso_metabolite_predicted_drym_valdis_sparse_sorted) == "DESIREE" )] <- "white"
+# lasso_color <- subset(lasso_color, levels (lasso_metabolite_predicted_drym_valdis_sparse_sorted) != "DESIREE")
+lasso_color_fac <- factor(lasso_color)
+
+png("boxplot_lasso_metabolite_predicted_drym_valdis_sparse.png", width=3000, height=1500, res=300)
+par(mar=c(4.5,5,2,0.5))
+boxplot(drym ~ lasso_metabolite_predicted_drym_valdis_sparse_sorted, data = lasso_metabolite_predicted_drym_valdis_sparse_df, 
+        ylab="DRYM", cex.lab=1.5, cex.axis=1.2, las=2, col=lasso_color, main = "metabolite model", names=F, xlab="genotype")
+legend("bottomright", fill=levels(lasso_color_fac), legend=c("ExA", "E", "AxR", "R", "A"), horiz=T)
+dev.off()
+```
+
+
+# Save workspace
+```{r save workspace}
+save.image("lasso_model.RData")
+```
+
+
+# Session Info
+```{r session info}
+sessionInfo()
+```
+
