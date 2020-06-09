@@ -1,16 +1,19 @@
 ---
-title: "TROST Select: LASSO Model"
+title: 'TROST Select: LASSO Model'
 author: "Heike Sprenger"
 date: "07/06/2020"
 output:
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
   html_document:
     highlight: tango
     number_section: yes
     theme: cerulean
     toc: yes
-    toc_float: true
     toc_depth: 4
-editor_options: 
+    toc_float: yes
+editor_options:
   chunk_output_type: console
 ---
 
@@ -372,6 +375,10 @@ lasso_predicted_drym <-
   rename(drym_transcript = drym) %>%
   mutate(drym_avg = (drym_metabolite + drym_transcript)/2) %>%
   arrange(drym_avg)
+
+write.table(lasso_predicted_drym, 
+            "lasso_predicted_drym_valdis_sparse_median.txt", 
+            sep = "\t", row.names = F)
 ```
 
 ## Subpopulations
