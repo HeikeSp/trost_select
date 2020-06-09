@@ -221,14 +221,14 @@ dim(compObs_metabolite_pred) # 806 samples
 set.seed(1)
 lasso_fit_transcript <- glmnet(x = as.matrix(compObs_transcript_training), 
                                 y = transcript_samples_training$mdrym_fve)
-plot(lasso_fit_transcript)
+# plot(lasso_fit_transcript)
 
 # Cross-validation (10-fold)
 set.seed(1111)
 lasso_cv_transcript <- glmnet::cv.glmnet(x = as.matrix(compObs_transcript_training), 
                                  y = transcript_samples_training$mdrym_fve)
 lasso_cv_transcript$lambda.1se # 0.001209806
-plot(lasso_cv_transcript, ylim=c(0, 0.005))
+# plot(lasso_cv_transcript, ylim=c(0, 0.005))
 
 lasso_cv_transcript_coef_1se <- predict(lasso_cv_transcript, 
                                          type = "coefficients", 
@@ -284,14 +284,14 @@ write.table(lasso_transcript_predicted_drym_valdis_1se_median,
 set.seed(1)
 lasso_fit_metabolite <- glmnet(x = as.matrix(compObs_metabolite_training), 
                                 y = metabolite_samples_training$mdrym_fve)
-plot(lasso_fit_metabolite)
+# plot(lasso_fit_metabolite)
 
 # Cross-validation (10-fold)
 set.seed(1111)
 lasso_cv_metabolite <- glmnet::cv.glmnet(x = as.matrix(compObs_metabolite_training), 
                                  y = metabolite_samples_training$mdrym_fve)
 lasso_cv_metabolite$lambda.1se # 0.0006964521
-plot(lasso_cv_metabolite, ylim=c(0, 0.005))
+# plot(lasso_cv_metabolite, ylim=c(0, 0.005))
 
 # define lambda for sparse model with 29 variables
 lambda.sparse <- 0.002
@@ -393,8 +393,7 @@ lasso_predicted_drym$select[which(lasso_predicted_drym$name %in% lines_MPt)] <- 
 lasso_predicted_drym$select[which(lasso_predicted_drym$name %in% lines_MPs)] <- "MPs"
 table(lasso_predicted_drym$select)
 
-ggplot(lasso_predicted_drym_sparse, aes(x = select, y = drym_avg)) + 
-  geom_boxplot()
+# ggplot(lasso_predicted_drym_sparse, aes(x = select, y = drym_avg)) + geom_boxplot()
 ```
 
 
